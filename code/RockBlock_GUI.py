@@ -125,16 +125,45 @@ class RockBlockModem:
             self.log("🔌 Đã ngắt kết nối cổng Serial.")
 
     def send_cmd(self, cmd, wait=1.5):
+        """Gửi AT command và đọc phản hồi ổn định hơn, đặc biệt với AT+SBDIX."""
         if not self.ser or not self.ser.is_open:
             self.log("⚠️ Cổng Serial chưa mở!")
             return ""
 
         try:
+            # Chỉ xóa dữ liệu cũ trước khi bắt đầu một command mới.
             self.ser.reset_input_buffer()
             self.ser.write((cmd + "\r").encode("ascii"))
-            time.sleep(wait)
-            resp = self.ser.read_all().decode("ascii", errors="ignore").strip()
+            self.ser.flush()
+
+            # SBDIX có thể mất nhiều giây để hoàn tất phiên vệ tinh.
+            timeout = max(float(wait), 1.0)
+            deadline = time.monotonic() + timeout
+            chunks = []
+
+            while time.monotonic() < deadline:
+                waiting = self.ser.in_waiting
+                if waiting:
+                    data = self.ser.read(waiting)
+                    if data:
+                        chunks.append(data.decode("ascii", errors="ignore"))
+                        current = "".join(chunks)
+
+                        # Với command thông thường, OK/ERROR là dấu kết thúc.
+                        # Với SBDIX, cần có +SBDIX và sau đó thường có OK.
+                        if cmd.strip().upper() == "AT+SBDIX":
+                            if "+SBDIX:" in current and ("\nOK" in current or current.rstrip().endswith("OK")):
+                                break
+                            if "ERROR" in current and "+SBDIX:" not in current:
+                                break
+                        elif "\nOK" in current or current.rstrip().endswith("OK") or "ERROR" in current:
+                            break
+                else:
+                    time.sleep(0.05)
+
+            resp = "".join(chunks).strip()
             return resp
+
         except Exception as e:
             self.log(f"❌ Lỗi gửi lệnh AT '{cmd}': {e}")
             return ""
@@ -194,16 +223,26 @@ class RockBlockModem:
         finally:
             self.lock.release()
 
-    def send_sbd_message(self, message_text, target_serial="0235708", wait_sbd=20):
+    def send_sbd_message(self, message_text, target_serial="0235708", wait_sbd=30):
+        """Gửi một MO message qua SBDIX. Giữ lock xuyên suốt phiên truyền."""
         with self.lock:
+            if not self.is_connected or not self.ser or not self.ser.is_open:
+                return False, "Modem chưa kết nối."
+
             if target_serial:
-                clean_target = f"{int(target_serial):07d}"
+                try:
+                    clean_target = f"{int(str(target_serial).strip()):07d}"
+                except (TypeError, ValueError):
+                    return False, f"Serial đích không hợp lệ: {target_serial}"
                 payload = f"RB{clean_target}{message_text}"
                 prefix_info = f"RB{clean_target}"
             else:
                 clean_target = "Default"
                 payload = message_text
                 prefix_info = "None"
+
+            if len(payload.encode("utf-8")) > 340:
+                return False, f"Payload quá dài: {len(payload.encode('utf-8'))} bytes (tối đa 340 bytes)."
 
             self.log("=" * 50)
             self.log(f"📤 GỬI TIN QUA VỆ TINH ĐẾN: {clean_target}")
@@ -232,21 +271,20 @@ class RockBlockModem:
                 try:
                     mo_status, momsn, mt_status, mtmsn, mt_len, mt_queued = sbdix_vals
 
-                    # Xóa bộ đệm MO sau khi gửi
-                    self.send_cmd("AT+SBDD0", wait=1.0)
-
                     desc = self.MO_STATUS_DESC.get(mo_status, f"Mã trạng thái {mo_status}")
                     self.log(f"📊 MO Status = {mo_status}: {desc} (MOMSN: {momsn})")
 
                     if mt_status == 1:
                         self.log(f"📬 [Tin nhắn MT nhận về kèm theo: {mt_len} bytes]")
 
-                    if mo_status in [0, 1, 2]:
+                    # Chỉ coi MO=0 là gửi thành công. Các mã khác phải được
+                    # giữ nguyên để dễ chẩn đoán lỗi từ modem/network.
+                    if mo_status == 0:
                         self.log(f"🎉 GỬI THÀNH CÔNG TỚI ROCKBLOCK {clean_target}!")
                         return True, f"Thành công! MOMSN: {momsn}"
                     else:
                         self.log(f"⚠️ Gửi thất bại: MO={mo_status} ({desc})")
-                        return False, f"Lỗi MO={mo_status}: {desc}"
+                        return False, f"Lỗi MO={mo_status}: {desc} | MOMSN={momsn}"
                 except Exception as e:
                     self.log(f"❌ Lỗi phân tích SBDIX: {e}")
                     return False, str(e)
@@ -1026,9 +1064,19 @@ class RockBlockDualApp:
         self._set_status(f"Sender đang truyền gói tin đến RockBLOCK {target} qua vệ tinh...")
 
         def _worker():
-            # Kiểm tra mức sóng nhanh trước khi gửi
-            self.sender_modem.check_signal()
-            ok, res_text = self.sender_modem.send_sbd_message(msg, target_serial=target, wait_sbd=20)
+            try:
+                # Không gọi check_signal() ở đây. Auto-CSQ và send đều dùng
+                # cùng Serial/lock; send_sbd_message sẽ giữ lock xuyên suốt
+                # AT+SBDD0 -> AT+SBDWT -> AT+SBDIX.
+                ok, res_text = self.sender_modem.send_sbd_message(
+                    msg,
+                    target_serial=target,
+                    wait_sbd=30
+                )
+            except Exception as e:
+                ok = False
+                res_text = f"Exception khi gửi: {e}"
+
             def _update_ui():
                 self.btn_sender_send.config(state="normal", text="🚀 GỬI QUA VỆ TINH (AT+SBDIX)")
                 if ok:
