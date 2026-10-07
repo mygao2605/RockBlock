@@ -39,9 +39,9 @@ class RockBlockModem:
     """Lớp quản lý giao tiếp AT Command với modem RockBLOCK 9603 qua cổng Serial."""
 
     MO_STATUS_DESC = {
-        0: "Thành công: MO message đã được Gateway Iridium tiếp nhận!",
-        1: "Thành công: Đã gửi nhưng tin quá lớn đối với bên nhận.",
-        2: "Thành công: Đã gửi nhưng không xác định vị trí vệ tinh.",
+        0: "Thành công",
+        1: "Thành công",
+        2: "Thành công",
         32: "Thất bại: Không bắt được sóng vệ tinh Iridium (Timeout).",
         33: "Thất bại: Mất kết nối vô tuyến trong quá trình truyền.",
         34: "Thất bại: Mạng vệ tinh báo bận / nghẽn kênh.",
