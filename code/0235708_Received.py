@@ -13,6 +13,7 @@ Cơ chế nhận và tự động phản hồi (Auto-ACK / 2-way):
 import sys
 import time
 import argparse
+import re
 from datetime import datetime
 import serial
 import serial.tools.list_ports
@@ -44,6 +45,25 @@ class RockBlockReceiver:
         34: "Thất bại: Giao thức mạng vệ tinh báo bận / nghẽn kênh.",
         35: "Thất bại: Modem Iridium bị khóa hoặc SIM chưa đăng ký gói cước SBD."
     }
+
+    @staticmethod
+    def parse_sbdix(resp):
+        """
+        Phân tích kết quả +SBDIX từ modem:
+        +SBDIX: <mo_status>, <momsn>, <mt_status>, <mtmsn>, <mt_len>, <mt_queued>
+        Trả về tuple 6 số nguyên hoặc None nếu không hợp lệ.
+        Dùng regex để tránh lỗi 'invalid literal for int' do dính chuỗi 'OK' và ký tự xuống dòng ở cuối.
+        """
+        match = re.search(r'\+SBDIX:\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)', resp)
+        if match:
+            return tuple(map(int, match.groups()))
+        # Fallback: tìm dòng chứa +SBDIX: và trích xuất tất cả các số nguyên
+        for line in resp.splitlines():
+            if "+SBDIX:" in line:
+                nums = re.findall(r'-?\d+', line.split("+SBDIX:")[1])
+                if len(nums) >= 6:
+                    return tuple(map(int, nums[:6]))
+        return None
 
     def __init__(self, port, baudrate=19200, timeout=3, log_file=None):
         self.port = port
@@ -162,13 +182,10 @@ class RockBlockReceiver:
         sbdix_resp = self.send_cmd("AT+SBDIX", wait=wait_sbd)
         self.log(f"📥 Phản hồi phiên SBDIX:\n{sbdix_resp}")
 
-        if "+SBDIX:" in sbdix_resp:
+        sbdix_vals = self.parse_sbdix(sbdix_resp)
+        if sbdix_vals:
             try:
-                params = sbdix_resp.split("+SBDIX:")[1].strip().split(",")
-                mt_status = int(params[2].strip())
-                mtmsn = int(params[3].strip())
-                mt_len = int(params[4].strip())
-                mt_queued = int(params[5].strip())
+                mo_status, momsn, mt_status, mtmsn, mt_len, mt_queued = sbdix_vals
 
                 desc = self.MT_STATUS_DESC.get(mt_status, f"Mã trạng thái MT không xác định: {mt_status}")
                 self.log(f"📊 Kết quả MT Status = {mt_status}: {desc}")
@@ -228,11 +245,10 @@ class RockBlockReceiver:
         self.log(f"📥 Phản hồi phiên gửi phản hồi:\n{sbdix_resp}")
 
         # 4. Phân tích kết quả gửi MO
-        if "+SBDIX:" in sbdix_resp:
+        sbdix_vals = self.parse_sbdix(sbdix_resp)
+        if sbdix_vals:
             try:
-                params = sbdix_resp.split("+SBDIX:")[1].strip().split(",")
-                mo_status = int(params[0].strip())
-                momsn = int(params[1].strip())
+                mo_status, momsn, mt_status, mtmsn, mt_len, mt_queued = sbdix_vals
 
                 # Xóa MO Buffer sau khi gửi
                 self.send_cmd("AT+SBDD0", wait=1.0)
@@ -251,11 +267,11 @@ class RockBlockReceiver:
             self.log("❌ Modem không phản hồi chuỗi +SBDIX.")
             return False
 
-    def listen_loop(self, poll_interval=30, max_cycles=0, auto_reply=True, target_serial="0235707", use_rb_prefix=True, ack_prefix="ACK_OK"):
+    def listen_loop(self, poll_interval=30, max_cycles=0, auto_reply=True, target_serial="0235707", use_rb_prefix=True, reply_msg="Hi B"):
         """
         Chế độ lắng nghe liên tục và TỰ ĐỘNG PHẢN HỒI:
         - Định kỳ kiểm tra hộp thư Iridium.
-        - KHI NHẬN ĐƯỢC TIN NHẮN MỚI: Tự động gửi lại 1 bản tin ACK ngược lại cho Sender!
+        - KHI NHẬN ĐƯỢC TIN NHẮN MỚI: Tự động gửi lại bản tin phản hồi (mặc định: 'Hi B') cho Sender!
         """
         self.log("=" * 60)
         self.log(f"🎧 BẬT CHẾ ĐỘ TRỰC NHẬN TIN NHẮN (Chu kỳ thăm dò: {poll_interval}s)")
@@ -277,13 +293,10 @@ class RockBlockReceiver:
                     if has_msg:
                         self.log(f"🎉 ĐÃ NHẬN ĐƯỢC TIN NHẮN MỚI: \"{msg}\"")
 
-                        # TỰ ĐỘNG GỬI LẠI 1 BẢN TIN PHẢN HỒI
+                        # TỰ ĐỘNG GỬI LẠI BẢN TIN PHẢN HỒI
                         if auto_reply:
-                            timestamp_str = datetime.now().strftime('%H:%M:%S')
-                            short_content = msg[:12] if len(msg) > 12 else msg
-                            reply_content = f"{ack_prefix}: RECV '{short_content}' TIME={timestamp_str}"
-
-                            self.log("🔄 Đang tự động gửi lại bản tin phản hồi...")
+                            reply_content = reply_msg
+                            self.log(f"🔄 Đang tự động gửi lại bản tin phản hồi: '{reply_content}'...")
                             time.sleep(2)
                             self.send_reply(
                                 reply_text=reply_content,
@@ -299,8 +312,7 @@ class RockBlockReceiver:
                             has_next, next_msg, queued = self.check_mailbox(wait_sbd=20)
                             if has_next and auto_reply:
                                 time.sleep(2)
-                                rep = f"{ack_prefix}: RECV '{next_msg[:12]}' TIME={datetime.now().strftime('%H:%M:%S')}"
-                                self.send_reply(rep, target_serial=target_serial, use_rb_prefix=use_rb_prefix, wait_sbd=20)
+                                self.send_reply(reply_msg, target_serial=target_serial, use_rb_prefix=use_rb_prefix, wait_sbd=20)
                     else:
                         self.log("📭 Hộp thư trống, chưa có tin nhắn mới.")
                 else:
@@ -336,6 +348,7 @@ def main():
     parser.add_argument("--sender-serial", default="0235707", help="Serial máy gửi cần phản hồi về (Mặc định: 0235707)")
     parser.add_argument("--interval", type=int, default=30, help="Chu kỳ thăm dò trong chế độ lắng nghe (giây, mặc định: 30)")
     parser.add_argument("--cycles", type=int, default=0, help="Số chu kỳ tối đa khi lắng nghe (0 = lặp vô hạn)")
+    parser.add_argument("--reply-text", default="Hi B", help="Nội dung phản hồi tự động về Sender (Mặc định: 'Hi B')")
     parser.add_argument("--no-auto-ack", action="store_true", help="Tắt tính năng tự động gửi lại phản hồi (Auto-ACK)")
     parser.add_argument("--mode", choices=["interactive", "listen", "oneshot"], default="interactive", help="Chế độ chạy")
     args = parser.parse_args()
@@ -347,6 +360,7 @@ def main():
 
     print(f"\n⚙️ Cấu hình thiết bị nhận: Port = {args.port}, Baud = {args.baud}")
     print(f"🎯 Đích phản hồi về    : {args.sender_serial} (Tiền tố: RB{int(args.sender_serial):07d})")
+    print(f"💬 Nội dung phản hồi   : '{args.reply_text}'")
     print(f"🤖 Tự động gửi lại tin : {'BẬT (Enabled)' if auto_reply else 'TẮT (Disabled)'}")
     print(f"📄 File lưu log        : {log_file}")
 
@@ -367,14 +381,14 @@ def main():
                 auto_reply=auto_reply,
                 target_serial=args.sender_serial,
                 use_rb_prefix=True,
-                ack_prefix="ACK_OK"
+                reply_msg=args.reply_text
             )
             return
         elif args.mode == "oneshot":
             receiver.check_signal()
             has_msg, msg, queued = receiver.check_mailbox(wait_sbd=20)
             if has_msg and auto_reply:
-                rep = f"ACK_OK: RECV '{msg[:15]}' TIME={datetime.now().strftime('%H:%M:%S')}"
+                rep = args.reply_text
                 receiver.send_reply(rep, target_serial=args.sender_serial, use_rb_prefix=True, wait_sbd=20)
             return
 
@@ -384,8 +398,8 @@ def main():
             print("🕹️  MENU ĐIỀU KHIỂN ROCKBLOCK RECEIVER (0235708)")
             print("=" * 55)
             print("1. Kiểm tra mức sóng vệ tinh (AT+CSQ)")
-            print("2. Kiểm tra hộp thư 1 lần (One-shot check & Auto-ACK)")
-            print(f"3. Bật chế độ lắng nghe liên tục (Chu kỳ {args.interval}s)")
+            print("2. Kiểm tra hộp thư 1 lần (One-shot check & Auto-ACK 'Hi B')")
+            print(f"3. Bật chế độ lắng nghe liên tục (Chu kỳ {args.interval}s, Phản hồi: '{args.reply_text}')")
             print("4. Gửi bản tin phản hồi thủ công về Sender")
             print(f"5. Chuyển trạng thái Auto-ACK (Hiện tại: {'BẬT' if auto_reply else 'TẮT'})")
             print("0. Thoát chương trình")
@@ -400,8 +414,8 @@ def main():
                 receiver.check_signal()
                 has_msg, msg, _ = receiver.check_mailbox(wait_sbd=20)
                 if has_msg and auto_reply:
-                    rep = f"ACK_OK: RECV '{msg[:15]}' TIME={datetime.now().strftime('%H:%M:%S')}"
-                    print(f"\n📤 [AUTO-REPLY] Đang tự động gửi lại phản hồi...")
+                    rep = args.reply_text
+                    print(f"\n📤 [AUTO-REPLY] Đang tự động gửi lại phản hồi '{rep}'...")
                     receiver.send_reply(rep, target_serial=args.sender_serial, use_rb_prefix=True, wait_sbd=20)
             elif choice == "3":
                 receiver.listen_loop(
@@ -410,14 +424,13 @@ def main():
                     auto_reply=auto_reply,
                     target_serial=args.sender_serial,
                     use_rb_prefix=True,
-                    ack_prefix="ACK_OK"
+                    reply_msg=args.reply_text
                 )
             elif choice == "4":
-                manual_msg = input("Nhập nội dung phản hồi muốn gửi: ").strip()
-                if manual_msg:
-                    receiver.send_reply(manual_msg, target_serial=args.sender_serial, use_rb_prefix=True, wait_sbd=20)
-                else:
-                    print("⚠️ Nội dung không được để trống!")
+                manual_msg = input(f"Nhập nội dung phản hồi muốn gửi (Nhấn Enter để gửi '{args.reply_text}'): ").strip()
+                if not manual_msg:
+                    manual_msg = args.reply_text
+                receiver.send_reply(manual_msg, target_serial=args.sender_serial, use_rb_prefix=True, wait_sbd=20)
             elif choice == "5":
                 auto_reply = not auto_reply
                 print(f"🔄 Đã chuyển trạng thái Auto-ACK thành: {'BẬT' if auto_reply else 'TẮT'}")

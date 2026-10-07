@@ -11,6 +11,7 @@ Nguyên lý định tuyến trực tiếp RockBLOCK-to-RockBLOCK (Direct Address
 import sys
 import time
 import argparse
+import re
 from datetime import datetime
 import serial
 import serial.tools.list_ports
@@ -36,6 +37,23 @@ class RockBlockSender:
         34: "Thất bại: Giao thức mạng vệ tinh báo bận / nghẽn kênh.",
         35: "Thất bại: Modem Iridium bị khóa hoặc SIM chưa đăng ký gói cước SBD."
     }
+
+    @staticmethod
+    def parse_sbdix(resp):
+        """
+        Phân tích kết quả +SBDIX từ modem:
+        +SBDIX: <mo_status>, <momsn>, <mt_status>, <mtmsn>, <mt_len>, <mt_queued>
+        Trả về tuple 6 số nguyên hoặc None nếu không hợp lệ.
+        """
+        match = re.search(r'\+SBDIX:\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)', resp)
+        if match:
+            return tuple(map(int, match.groups()))
+        for line in resp.splitlines():
+            if "+SBDIX:" in line:
+                nums = re.findall(r'-?\d+', line.split("+SBDIX:")[1])
+                if len(nums) >= 6:
+                    return tuple(map(int, nums[:6]))
+        return None
 
     def __init__(self, port, baudrate=19200, timeout=3, log_file=None):
         self.port = port
@@ -192,13 +210,10 @@ class RockBlockSender:
         self.log(f"📥 Phản hồi từ phiên SBDIX:\n{sbdix_resp}")
 
         # Bước 4: Phân tích kết quả trả về từ +SBDIX
-        if "+SBDIX:" in sbdix_resp:
+        sbdix_vals = self.parse_sbdix(sbdix_resp)
+        if sbdix_vals:
             try:
-                raw_params = sbdix_resp.split("+SBDIX:")[1].strip().split(",")
-                mo_status = int(raw_params[0].strip())
-                momsn = int(raw_params[1].strip())
-                mt_status = int(raw_params[2].strip())
-                mt_len = int(raw_params[4].strip())
+                mo_status, momsn, mt_status, mtmsn, mt_len, mt_queued = sbdix_vals
 
                 desc = self.MO_STATUS_DESC.get(mo_status, f"Mã trạng thái MO không xác định: {mo_status}")
                 self.log(f"📊 Kết quả MO Status = {mo_status}: {desc}")
@@ -236,10 +251,10 @@ class RockBlockSender:
         """Kiểm tra xem Receiver đã gửi lại bản tin phản hồi (ACK) hay chưa."""
         self.log("📡 Đang kiểm tra hộp thư vệ tinh (AT+SBDIX) để tìm bản tin phản hồi (ACK)...")
         sbdix_resp = self.send_cmd("AT+SBDIX", wait=wait_sbd)
-        if "+SBDIX:" in sbdix_resp:
+        sbdix_vals = self.parse_sbdix(sbdix_resp)
+        if sbdix_vals:
             try:
-                params = sbdix_resp.split("+SBDIX:")[1].strip().split(",")
-                mt_status = int(params[2].strip())
+                mo_status, momsn, mt_status, mtmsn, mt_len, mt_queued = sbdix_vals
                 if mt_status == 1:
                     ack_msg = self.read_buffer_content()
                     self.log(f"🎉 NHẬN ĐƯỢC BẢN TIN PHẢN HỒI (ACK): \"{ack_msg}\"")
@@ -310,7 +325,7 @@ def main():
             print("=" * 50)
             print("1. Kiểm tra mức sóng vệ tinh (AT+CSQ)")
             print("2. Chờ sóng đủ mạnh (tối thiểu 2 vạch)")
-            print("3. Gửi tin nhắn mẫu (HELLO kèm timestamp)")
+            print("3. Gửi tin nhắn mẫu ('Hello A')")
             print("4. Nhập tin nhắn tùy chỉnh để gửi")
             print("5. Gửi dữ liệu cảm biến / định vị (Telemetry)")
             print("6. Kiểm tra bản tin phản hồi (ACK) từ Receiver")
@@ -325,7 +340,7 @@ def main():
             elif choice == "2":
                 sender.wait_for_signal(min_bars=2, max_attempts=8, interval=5)
             elif choice == "3":
-                msg = f"HELLO FROM {args.sender} TO {args.target} TIME={datetime.now().strftime('%H:%M:%S')}"
+                msg = "Hello A"
                 sender.send_message(msg, target_serial=args.target, wait_sbd=20)
             elif choice == "4":
                 user_msg = input("Nhập nội dung cần gửi: ").strip()

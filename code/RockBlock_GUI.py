@@ -16,6 +16,7 @@ Bao gồm:
 import sys
 import time
 import threading
+import re
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
@@ -52,6 +53,25 @@ class RockBlockModem:
         1: "Thành công: Đã nhận được 1 tin nhắn MT từ Gateway về modem!",
         2: "Lỗi trong quá trình nhận tin nhắn MT từ Gateway."
     }
+
+    @staticmethod
+    def parse_sbdix(resp):
+        """
+        Phân tích kết quả +SBDIX từ modem:
+        +SBDIX: <mo_status>, <momsn>, <mt_status>, <mtmsn>, <mt_len>, <mt_queued>
+        Trả về tuple 6 số nguyên (mo_status, momsn, mt_status, mtmsn, mt_len, mt_queued) hoặc None nếu không hợp lệ.
+        Dùng regex để tránh lỗi 'invalid literal for int' do dính chuỗi 'OK' và ký tự xuống dòng ở cuối.
+        """
+        match = re.search(r'\+SBDIX:\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)', resp)
+        if match:
+            return tuple(map(int, match.groups()))
+        # Fallback: tìm dòng chứa +SBDIX: và trích xuất tất cả các số nguyên
+        for line in resp.splitlines():
+            if "+SBDIX:" in line:
+                nums = re.findall(r'-?\d+', line.split("+SBDIX:")[1])
+                if len(nums) >= 6:
+                    return tuple(map(int, nums[:6]))
+        return None
 
     def __init__(self, name="RockBLOCK", log_callback=None):
         self.name = name
@@ -207,13 +227,10 @@ class RockBlockModem:
             self.log(f"📥 Phản hồi SBDIX:\n{sbdix_resp}")
 
             # 4. Phân tích kết quả
-            if "+SBDIX:" in sbdix_resp:
+            sbdix_vals = self.parse_sbdix(sbdix_resp)
+            if sbdix_vals:
                 try:
-                    params = sbdix_resp.split("+SBDIX:")[1].strip().split(",")
-                    mo_status = int(params[0].strip())
-                    momsn = int(params[1].strip())
-                    mt_status = int(params[2].strip())
-                    mt_len = int(params[4].strip())
+                    mo_status, momsn, mt_status, mtmsn, mt_len, mt_queued = sbdix_vals
 
                     # Xóa bộ đệm MO sau khi gửi
                     self.send_cmd("AT+SBDD0", wait=1.0)
@@ -250,13 +267,10 @@ class RockBlockModem:
             self.log(f"📡 Đang kiểm tra hộp thư vệ tinh (AT+SBDIX, chờ {wait_sbd}s)...")
             sbdix_resp = self.send_cmd("AT+SBDIX", wait=wait_sbd)
 
-            if "+SBDIX:" in sbdix_resp:
+            sbdix_vals = self.parse_sbdix(sbdix_resp)
+            if sbdix_vals:
                 try:
-                    params = sbdix_resp.split("+SBDIX:")[1].strip().split(",")
-                    mt_status = int(params[2].strip())
-                    mtmsn = int(params[3].strip())
-                    mt_len = int(params[4].strip())
-                    mt_queued = int(params[5].strip())
+                    mo_status, momsn, mt_status, mtmsn, mt_len, mt_queued = sbdix_vals
 
                     desc = self.MT_STATUS_DESC.get(mt_status, f"MT Status: {mt_status}")
                     self.log(f"📊 Kết quả MT Status = {mt_status}: {desc}")
@@ -468,7 +482,7 @@ class RockBlockDualApp:
         tk.Label(sr1, text="Nội dung gửi:", font=("Segoe UI", 9, "bold"), bg="#ffffff").pack(side="left", padx=5)
 
         self.sender_msg_entry = ttk.Entry(sr1)
-        self.sender_msg_entry.insert(0, "HELLO FROM 0235707 TO 0235708")
+        self.sender_msg_entry.insert(0, "Hello A")
         self.sender_msg_entry.pack(side="left", fill="x", expand=True, padx=5)
         self.sender_msg_entry.bind("<KeyRelease>", self._update_sender_payload_preview)
 
@@ -487,7 +501,7 @@ class RockBlockDualApp:
 
         self.sender_preview_lbl = tk.Label(
             sr2,
-            text="📦 Xem trước lệnh: AT+SBDWT=RB0235708HELLO FROM 0235707 TO 0235708 (38 bytes)",
+            text="📦 Xem trước lệnh: AT+SBDWT=RB0235708Hello A (16 bytes)",
             font=("Consolas", 9),
             fg="#2d3748",
             bg="#edf2f7",
@@ -502,6 +516,7 @@ class RockBlockDualApp:
         sr3.pack(fill="x", pady=(4, 0))
 
         tk.Label(sr3, text="Mẫu tin nhanh:", font=("Segoe UI", 8, "italic"), bg="#ffffff").pack(side="left", padx=5)
+        ttk.Button(sr3, text="👋 Hello A", command=lambda: self._set_msg_text("Hello A")).pack(side="left", padx=3)
         ttk.Button(sr3, text="💬 Ping Timestamp", command=self._set_sample_ping).pack(side="left", padx=3)
         ttk.Button(sr3, text="📍 GPS Telemetry", command=self._set_sample_gps).pack(side="left", padx=3)
         ttk.Button(sr3, text="🚨 Cảnh Báo SOS", command=self._set_sample_sos).pack(side="left", padx=3)
@@ -616,9 +631,9 @@ class RockBlockDualApp:
         )
         cb_auto_ack.pack(side="left", padx=5)
 
-        tk.Label(cr1, text="Tiền tố ACK:", font=("Segoe UI", 9, "bold"), bg="#ffffff").pack(side="left", padx=(15, 5))
+        tk.Label(cr1, text="Nội dung Auto-Reply:", font=("Segoe UI", 9, "bold"), bg="#ffffff").pack(side="left", padx=(15, 5))
         self.recv_ack_prefix_entry = ttk.Entry(cr1, width=10)
-        self.recv_ack_prefix_entry.insert(0, "ACK_OK")
+        self.recv_ack_prefix_entry.insert(0, "Hi B")
         self.recv_ack_prefix_entry.pack(side="left", padx=5)
 
         tk.Label(cr1, text="Chu kỳ thăm dò:", font=("Segoe UI", 9, "bold"), bg="#ffffff").pack(side="left", padx=(15, 5))
@@ -656,7 +671,7 @@ class RockBlockDualApp:
         btn_manual_reply.pack(side="right", padx=5)
 
         self.recv_manual_reply_entry = ttk.Entry(cr2, width=28)
-        self.recv_manual_reply_entry.insert(0, "ACK: MANUAL_CONFIRM")
+        self.recv_manual_reply_entry.insert(0, "Hi B")
         self.recv_manual_reply_entry.pack(side="right", padx=5)
         tk.Label(cr2, text="Nội dung gửi lại:", font=("Segoe UI", 9), bg="#ffffff").pack(side="right", padx=5)
 
@@ -968,6 +983,11 @@ class RockBlockDualApp:
             text=f"📦 Xem trước lệnh: AT+SBDWT={full} ({len(full)} bytes)"
         )
 
+    def _set_msg_text(self, text):
+        self.sender_msg_entry.delete(0, tk.END)
+        self.sender_msg_entry.insert(0, text)
+        self._update_sender_payload_preview()
+
     def _set_sample_ping(self):
         sender_id = self.sender_serial_entry.get().strip()
         target_id = self.sender_target_entry.get().strip()
@@ -1167,13 +1187,11 @@ class RockBlockDualApp:
 
     def _trigger_auto_ack(self, original_msg, item_id):
         sender_target = self.recv_sender_target_entry.get().strip()
-        prefix = self.recv_ack_prefix_entry.get().strip() or "ACK_OK"
-        short_snippet = original_msg[:12] if len(original_msg) > 12 else original_msg
-        ack_payload = f"{prefix}: RECV '{short_snippet}' T={datetime.now().strftime('%H:%M:%S')}"
+        ack_payload = self.recv_ack_prefix_entry.get().strip() or "Hi B"
 
         def _ack_worker():
             time.sleep(2)
-            self._set_status(f"Receiver: Đang tự động gửi bản tin phản hồi (ACK) về {sender_target}...")
+            self._set_status(f"Receiver: Đang tự động gửi bản tin phản hồi ('{ack_payload}') về {sender_target}...")
             ok, res = self.receiver_modem.send_sbd_message(ack_payload, target_serial=sender_target, wait_sbd=20)
             def _done():
                 status_str = "✅ Đã gửi ACK thành công" if ok else "❌ Gửi ACK thất bại"
