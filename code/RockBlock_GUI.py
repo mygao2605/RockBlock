@@ -227,13 +227,13 @@ class RockBlockModem:
         """Gửi một MO message qua SBDIX. Giữ lock xuyên suốt phiên truyền."""
         with self.lock:
             if not self.is_connected or not self.ser or not self.ser.is_open:
-                return False, "Modem chưa kết nối."
+                return False, "Modem chưa kết nối.", None
 
             if target_serial:
                 try:
                     clean_target = f"{int(str(target_serial).strip()):07d}"
                 except (TypeError, ValueError):
-                    return False, f"Serial đích không hợp lệ: {target_serial}"
+                    return False, f"Serial đích không hợp lệ: {target_serial}", None
                 payload = f"RB{clean_target}{message_text}"
                 prefix_info = f"RB{clean_target}"
             else:
@@ -242,7 +242,7 @@ class RockBlockModem:
                 prefix_info = "None"
 
             if len(payload.encode("utf-8")) > 340:
-                return False, f"Payload quá dài: {len(payload.encode('utf-8'))} bytes (tối đa 340 bytes)."
+                return False, f"Payload quá dài: {len(payload.encode('utf-8'))} bytes (tối đa 340 bytes).", None
 
             self.log("=" * 50)
             self.log(f"📤 GỬI TIN QUA VỆ TINH ĐẾN: {clean_target}")
@@ -258,7 +258,7 @@ class RockBlockModem:
             write_resp = self.send_cmd(f"AT+SBDWT={payload}", wait=1.0)
             if "OK" not in write_resp:
                 self.log(f"❌ Nạp bộ đệm MO thất bại: {write_resp}")
-                return False, f"Nạp buffer thất bại: {write_resp}"
+                return False, f"Nạp buffer thất bại: {write_resp}", None
 
             # 3. Kích hoạt phiên vệ tinh SBDIX
             self.log(f"🚀 Đang gọi AT+SBDIX (kết nối vệ tinh, chờ khoảng {wait_sbd}s)...")
@@ -274,23 +274,26 @@ class RockBlockModem:
                     desc = self.MO_STATUS_DESC.get(mo_status, f"Mã trạng thái {mo_status}")
                     self.log(f"📊 MO Status = {mo_status}: {desc} (MOMSN: {momsn})")
 
+                    mt_msg = None
                     if mt_status == 1:
                         self.log(f"📬 [Tin nhắn MT nhận về kèm theo: {mt_len} bytes]")
+                        mt_msg = self.read_mt_buffer()
+                        self.log(f"📩 Nội dung tin nhắn MT nhận về: \"{mt_msg}\"")
 
                     # Chỉ coi MO=0 là gửi thành công. Các mã khác phải được
                     # giữ nguyên để dễ chẩn đoán lỗi từ modem/network.
                     if mo_status == 0:
                         self.log(f"🎉 GỬI THÀNH CÔNG TỚI ROCKBLOCK {clean_target}!")
-                        return True, f"Thành công! MOMSN: {momsn}"
+                        return True, f"Thành công! MOMSN: {momsn}", mt_msg
                     else:
                         self.log(f"⚠️ Gửi thất bại: MO={mo_status} ({desc})")
-                        return False, f"Lỗi MO={mo_status}: {desc} | MOMSN={momsn}"
+                        return False, f"Lỗi MO={mo_status}: {desc} | MOMSN={momsn}", mt_msg
                 except Exception as e:
                     self.log(f"❌ Lỗi phân tích SBDIX: {e}")
-                    return False, str(e)
+                    return False, str(e), None
             else:
                 self.log("❌ Không nhận được phản hồi +SBDIX từ modem.")
-                return False, "Không có phản hồi +SBDIX"
+                return False, "Không có phản hồi +SBDIX", None
 
     def read_mt_buffer(self):
         """Đọc và xóa nội dung trong MT Buffer."""
@@ -359,6 +362,14 @@ class RockBlockDualApp:
         self.is_listening = False
         self.listen_thread = None
 
+        # Bộ đếm thống kê tin nhắn gửi và nhận thành công
+        self.stats = {
+            "sender_sent": 0,    # Sender gửi MO thành công
+            "sender_recv": 0,    # Sender nhận MT / ACK thành công
+            "receiver_recv": 0,  # Receiver nhận MT thành công
+            "receiver_sent": 0,  # Receiver gửi ACK thành công
+        }
+
         # Xây dựng giao diện
         self._build_header()
         self._build_tabs()
@@ -394,27 +405,68 @@ class RockBlockDualApp:
         self.style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"), foreground="#2b6cb0", background="#ffffff")
 
     def _build_header(self):
-        header_frame = tk.Frame(self.root, bg="#1a365d", height=65)
+        header_frame = tk.Frame(self.root, bg="#1a365d", height=70)
         header_frame.pack(fill="x", side="top")
         header_frame.pack_propagate(False)
 
+        # Cột trái: Tiêu đề
+        left_h = tk.Frame(header_frame, bg="#1a365d")
+        left_h.pack(side="left", padx=16, pady=5)
+
         title_lbl = tk.Label(
-            header_frame,
+            left_h,
             text="🛰️ HỆ THỐNG TRUYỀN THÔNG VỆ TINH IRIDIUM - ROCKBLOCK 9603",
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 12, "bold"),
             fg="#ffffff",
             bg="#1a365d"
         )
-        title_lbl.pack(anchor="w", padx=20, pady=(8, 0))
+        title_lbl.pack(anchor="w")
 
         sub_lbl = tk.Label(
-            header_frame,
+            left_h,
             text="Điều khiển hai chiều Direct Addressing (RB-to-RB) giữa Module Phát (0235707) & Module Thu (0235708)",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 8),
             fg="#cbd5e0",
             bg="#1a365d"
         )
-        sub_lbl.pack(anchor="w", padx=20, pady=(2, 8))
+        sub_lbl.pack(anchor="w", pady=(1, 0))
+
+        # Cột phải: Thanh Card Thống Kê Tổng Hợp (Header Stats Dashboard)
+        stats_h = tk.Frame(header_frame, bg="#1a365d")
+        stats_h.pack(side="right", padx=16, pady=6)
+
+        # Thẻ 1: Tổng Gửi Thành Công
+        card_sent = tk.Frame(stats_h, bg="#2b6cb0", padx=12, pady=3, relief="groove", bd=1)
+        card_sent.pack(side="left", padx=4)
+
+        tk.Label(card_sent, text="📤 TỔNG GỬI TC", font=("Segoe UI", 7, "bold"), fg="#e2e8f0", bg="#2b6cb0").pack()
+        self.header_sent_val_lbl = tk.Label(card_sent, text="0", font=("Segoe UI", 13, "bold"), fg="#ffffff", bg="#2b6cb0")
+        self.header_sent_val_lbl.pack()
+
+        # Thẻ 2: Tổng Nhận Thành Công
+        card_recv = tk.Frame(stats_h, bg="#276749", padx=12, pady=3, relief="groove", bd=1)
+        card_recv.pack(side="left", padx=4)
+
+        tk.Label(card_recv, text="📥 TỔNG NHẬN TC", font=("Segoe UI", 7, "bold"), fg="#e2e8f0", bg="#276749").pack()
+        self.header_recv_val_lbl = tk.Label(card_recv, text="0", font=("Segoe UI", 13, "bold"), fg="#ffffff", bg="#276749")
+        self.header_recv_val_lbl.pack()
+
+        # Nút Đặt Lại Thống Kê
+        btn_reset_stats = tk.Button(
+            stats_h,
+            text="🔄 Đặt Lại",
+            font=("Segoe UI", 8, "bold"),
+            bg="#2d3748",
+            fg="#e2e8f0",
+            activebackground="#4a5568",
+            activeforeground="#ffffff",
+            bd=0,
+            padx=6,
+            pady=8,
+            cursor="hand2",
+            command=self._reset_stats
+        )
+        btn_reset_stats.pack(side="left", padx=(4, 0))
 
     def _build_tabs(self):
         self.notebook = ttk.Notebook(self.root)
@@ -487,7 +539,7 @@ class RockBlockDualApp:
         btn_sender_csq = ttk.Button(r2, text="📶 Đo Sóng CSQ", command=self._check_sender_signal)
         btn_sender_csq.pack(side="left", padx=10)
 
-        self.sender_csq_lbl = tk.Label(r2, text="Sóng: [□□□□□] (0/5)", font=("Consolas", 10, "bold"), fg="#2b6cb0", bg="#ffffff")
+        self.sender_csq_lbl = tk.Label(r2, text="Sóng: [□□□□□] (0/5)", font=("Consolas", 5, "bold"), fg="#2b6cb0", bg="#ffffff")
         self.sender_csq_lbl.pack(side="left", padx=5)
 
         # Tự động đo sóng định kỳ cho Sender
@@ -507,6 +559,19 @@ class RockBlockDualApp:
 
         self.sender_last_csq_time = tk.Label(r2, text="", font=("Segoe UI", 8, "italic"), fg="#718096", bg="#ffffff")
         self.sender_last_csq_time.pack(side="left", padx=6)
+
+        # Dòng thống kê Sender
+        r3 = tk.Frame(cfg_box, bg="#ebf8ff", padx=8, pady=4, relief="groove", bd=1)
+        r3.pack(fill="x", pady=(6, 0))
+
+        self.sender_stats_lbl = tk.Label(
+            r3,
+            text="📊 Thống kê Sender:   📤 Gửi thành công: 0 tin   |   📥 Nhận về thành công: 0 tin",
+            font=("Segoe UI", 9, "bold"),
+            fg="#2b6cb0",
+            bg="#ebf8ff"
+        )
+        self.sender_stats_lbl.pack(side="left")
 
         # Khung Soạn Thảo & Gửi Tin
         mid_frame = tk.Frame(parent, bg="#f4f6f9")
@@ -562,6 +627,55 @@ class RockBlockDualApp:
         btn_check_ack = ttk.Button(sr3, text="🔍 Kiểm Tra ACK Từ Receiver", command=self._check_sender_ack)
         btn_check_ack.pack(side="right", padx=5)
 
+        # Khung Hộp Thư Nhận Về & Phản Hồi (Sender Inbox)
+        inbox_box = ttk.LabelFrame(parent, text="📬 TIN NHẮN GỬI VỀ / PHẢN HỒI (INBOX SENDER)", padding=8)
+        inbox_box.pack(fill="both", expand=True, padx=10, pady=5)
+
+        cols = ("time", "source", "content", "length", "status")
+        self.sender_inbox_tree = ttk.Treeview(inbox_box, columns=cols, show="headings", height=5)
+        self.sender_inbox_tree.heading("time", text="Thời Gian")
+        self.sender_inbox_tree.heading("source", text="Phân Loại")
+        self.sender_inbox_tree.heading("content", text="Nội Dung Tin Nhắn Nhận Về")
+        self.sender_inbox_tree.heading("length", text="Độ Dài")
+        self.sender_inbox_tree.heading("status", text="Trạng Thái")
+
+        self.sender_inbox_tree.column("time", width=130, anchor="center")
+        self.sender_inbox_tree.column("source", width=140, anchor="center")
+        self.sender_inbox_tree.column("content", width=500, anchor="w")
+        self.sender_inbox_tree.column("length", width=70, anchor="center")
+        self.sender_inbox_tree.column("status", width=100, anchor="center")
+
+        sender_tree_scroll = ttk.Scrollbar(inbox_box, orient="vertical", command=self.sender_inbox_tree.yview)
+        self.sender_inbox_tree.configure(yscrollcommand=sender_tree_scroll.set)
+
+        self.sender_inbox_tree.pack(side="left", fill="both", expand=True)
+        sender_tree_scroll.pack(side="right", fill="y")
+        self.sender_inbox_tree.bind("<Double-1>", lambda event: self._show_tree_detail(self.sender_inbox_tree, "Chi Tiết Tin Nhắn Gửi Về Sender"))
+
+        # Thanh công cụ bên dưới bảng Inbox Sender
+        inbox_btn_frame = tk.Frame(inbox_box, bg="#ffffff")
+        inbox_btn_frame.pack(fill="x", pady=(4, 0))
+
+        btn_check_mailbox = ttk.Button(
+            inbox_btn_frame,
+            text="📬 Kiểm Tra Hộp Thư (Check Mailbox)",
+            style="Primary.TButton",
+            command=self._check_sender_ack
+        )
+        btn_check_mailbox.pack(side="left", padx=5)
+
+        self.sender_inbox_count_lbl = tk.Label(
+            inbox_btn_frame,
+            text="Tổng nhận: 0 tin nhắn",
+            font=("Segoe UI", 9, "italic"),
+            fg="#4a5568",
+            bg="#ffffff"
+        )
+        self.sender_inbox_count_lbl.pack(side="left", padx=10)
+
+        ttk.Button(inbox_btn_frame, text="🗑️ Xóa Hộp Thư", command=self._clear_sender_inbox).pack(side="right", padx=5)
+        ttk.Button(inbox_btn_frame, text="💾 Xuất Tin Nhắn", command=lambda: self._export_tree_data(self.sender_inbox_tree, "sender_inbox")).pack(side="right", padx=5)
+
         # Khung Nhật Ký (Log Console) Sender
         log_box = ttk.LabelFrame(parent, text="📜 NHẬT KÝ HOẠT ĐỘNG SENDER", padding=8)
         log_box.pack(fill="both", expand=True, padx=10, pady=(5, 10))
@@ -571,7 +685,8 @@ class RockBlockDualApp:
             font=("Consolas", 9),
             bg="#1a202c",
             fg="#e2e8f0",
-            insertbackground="#ffffff"
+            insertbackground="#ffffff",
+            height=8
         )
         self.sender_log_text.pack(fill="both", expand=True)
 
@@ -632,7 +747,7 @@ class RockBlockDualApp:
         btn_recv_csq = ttk.Button(r2, text="📶 Đo Sóng CSQ", command=self._check_receiver_signal)
         btn_recv_csq.pack(side="left", padx=10)
 
-        self.recv_csq_lbl = tk.Label(r2, text="Sóng: [□□□□□] (0/5)", font=("Consolas", 10, "bold"), fg="#2b6cb0", bg="#ffffff")
+        self.recv_csq_lbl = tk.Label(r2, text="Sóng: [□□□□□] (0/5)", font=("Consolas", 5, "bold"), fg="#2b6cb0", bg="#ffffff")
         self.recv_csq_lbl.pack(side="left", padx=5)
 
         # Tự động đo sóng định kỳ cho Receiver
@@ -652,6 +767,19 @@ class RockBlockDualApp:
 
         self.recv_last_csq_time = tk.Label(r2, text="", font=("Segoe UI", 8, "italic"), fg="#718096", bg="#ffffff")
         self.recv_last_csq_time.pack(side="left", padx=6)
+
+        # Dòng thống kê Receiver
+        r3 = tk.Frame(cfg_box, bg="#f0fff4", padx=8, pady=4, relief="groove", bd=1)
+        r3.pack(fill="x", pady=(6, 0))
+
+        self.receiver_stats_lbl = tk.Label(
+            r3,
+            text="📊 Thống kê Receiver:   📥 Nhận thành công: 0 tin   |   📤 Phản hồi ACK thành công: 0 tin",
+            font=("Segoe UI", 9, "bold"),
+            fg="#276749",
+            bg="#f0fff4"
+        )
+        self.receiver_stats_lbl.pack(side="left")
 
         # Khung Điều khiển Nhận & Tự Động Phản Hồi (Auto-ACK)
         ctrl_box = ttk.LabelFrame(parent, text="🎧 ĐIỀU KHIỂN NHẬN TIN & TỰ ĐỘNG PHẢN HỒI (AUTO-ACK)", padding=10)
@@ -734,6 +862,13 @@ class RockBlockDualApp:
 
         self.inbox_tree.pack(side="left", fill="both", expand=True)
         tree_scroll.pack(side="right", fill="y")
+        self.inbox_tree.bind("<Double-1>", lambda event: self._show_tree_detail(self.inbox_tree, "Chi Tiết Tin Nhắn Nhận Được (Receiver)"))
+
+        # Thanh công cụ bên dưới bảng Inbox Receiver
+        recv_inbox_btn_frame = tk.Frame(inbox_box, bg="#ffffff")
+        recv_inbox_btn_frame.pack(fill="x", pady=(4, 0))
+        ttk.Button(recv_inbox_btn_frame, text="🗑️ Xóa Hộp Thư", command=lambda: [self.inbox_tree.delete(i) for i in self.inbox_tree.get_children()]).pack(side="right", padx=5)
+        ttk.Button(recv_inbox_btn_frame, text="💾 Xuất Tin Nhắn", command=lambda: self._export_tree_data(self.inbox_tree, "receiver_inbox")).pack(side="right", padx=5)
 
         # Khung Log Receiver
         log_box = ttk.LabelFrame(parent, text="📜 NHẬT KÝ HOẠT ĐỘNG RECEIVER", padding=8)
@@ -840,6 +975,61 @@ class RockBlockDualApp:
 
     def _set_status(self, text):
         self.statusbar.config(text=f"[{datetime.now().strftime('%H:%M:%S')}] {text}")
+
+    # --------------------------------------------------------------------------
+    # QUẢN LÝ THỐNG KÊ (MESSAGE STATISTICS)
+    # --------------------------------------------------------------------------
+    def _record_stat(self, stat_name):
+        """Ghi nhận thêm 1 sự kiện gửi hoặc nhận thành công và cập nhật UI."""
+        if stat_name in self.stats:
+            self.stats[stat_name] += 1
+            self.root.after(0, self._update_stats_ui)
+
+    def _reset_stats(self):
+        """Đặt lại bộ đếm thống kê về 0 sau khi người dùng xác nhận."""
+        if messagebox.askyesno("Xác nhận Đặt Lại", "Bạn có chắc muốn đặt lại toàn bộ số liệu thống kê tin nhắn về 0?"):
+            for k in self.stats:
+                self.stats[k] = 0
+            self._update_stats_ui()
+            self._set_status("Đã đặt lại tất cả bộ đếm thống kê tin nhắn về 0.")
+
+    def _update_stats_ui(self):
+        """Cập nhật các số liệu thống kê trên Header, Tab Sender, Tab Receiver và Dual Monitor."""
+        s_sent = self.stats["sender_sent"]
+        s_recv = self.stats["sender_recv"]
+        r_recv = self.stats["receiver_recv"]
+        r_sent = self.stats["receiver_sent"]
+        total_sent = s_sent + r_sent
+        total_recv = s_recv + r_recv
+
+        # 1. Cập nhật thẻ Header
+        if hasattr(self, "header_sent_val_lbl"):
+            self.header_sent_val_lbl.config(text=str(total_sent))
+        if hasattr(self, "header_recv_val_lbl"):
+            self.header_recv_val_lbl.config(text=str(total_recv))
+
+        # 2. Cập nhật Tab Sender
+        if hasattr(self, "sender_stats_lbl"):
+            self.sender_stats_lbl.config(
+                text=f"📊 Thống kê Sender:   📤 Gửi thành công: {s_sent} tin   |   📥 Nhận về thành công: {s_recv} tin"
+            )
+
+        # 3. Cập nhật Tab Receiver
+        if hasattr(self, "receiver_stats_lbl"):
+            self.receiver_stats_lbl.config(
+                text=f"📊 Thống kê Receiver:   📥 Nhận thành công: {r_recv} tin   |   📤 Phản hồi ACK thành công: {r_sent} tin"
+            )
+
+        # 4. Cập nhật Dual Monitor nếu các modem đang kết nối
+        if hasattr(self, "dual_sender_info") and self.sender_modem.is_connected:
+            self.dual_sender_info.config(
+                text=f"Cổng: {self.sender_modem.port} | Sóng: {self.sender_modem.last_bars}/5 | Gửi TC: {s_sent} | Nhận TC: {s_recv}"
+            )
+        if hasattr(self, "dual_recv_info") and self.receiver_modem.is_connected:
+            listen_state = f"BẬT ({self.recv_interval_cb.get()}s)" if self.is_listening else "TẮT"
+            self.dual_recv_info.config(
+                text=f"Cổng: {self.receiver_modem.port} | Sóng: {self.receiver_modem.last_bars}/5 | Trực nhận: {listen_state} | Nhận TC: {r_recv} | Gửi ACK: {r_sent}"
+            )
 
     # --------------------------------------------------------------------------
     # QUẢN LÝ CỔNG COM
@@ -1068,7 +1258,7 @@ class RockBlockDualApp:
                 # Không gọi check_signal() ở đây. Auto-CSQ và send đều dùng
                 # cùng Serial/lock; send_sbd_message sẽ giữ lock xuyên suốt
                 # AT+SBDD0 -> AT+SBDWT -> AT+SBDIX.
-                ok, res_text = self.sender_modem.send_sbd_message(
+                ok, res_text, rx_msg = self.sender_modem.send_sbd_message(
                     msg,
                     target_serial=target,
                     wait_sbd=30
@@ -1076,12 +1266,23 @@ class RockBlockDualApp:
             except Exception as e:
                 ok = False
                 res_text = f"Exception khi gửi: {e}"
+                rx_msg = None
 
             def _update_ui():
                 self.btn_sender_send.config(state="normal", text="🚀 GỬI QUA VỆ TINH (AT+SBDIX)")
                 if ok:
+                    self._record_stat("sender_sent")
                     self._set_status("Sender: Gửi thông điệp qua vệ tinh THÀNH CÔNG!")
-                    messagebox.showinfo("Thành công", f"Đã gửi thông điệp tới {target} thành công!\n{res_text}")
+                    if rx_msg:
+                        self._record_stat("sender_recv")
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        self._add_sender_inbox_item(timestamp, rx_msg, source="Kèm phiên gửi (MT)", status="Đã nhận")
+                        messagebox.showinfo(
+                            "Thành công & Nhận Tin Mới",
+                            f"Đã gửi thông điệp tới {target} thành công!\n{res_text}\n\n📬 ĐỒNG THỜI NHẬN ĐƯỢC TIN NHẮN PHẢN HỒI TỪ VỆ TINH:\n\"{rx_msg}\""
+                        )
+                    else:
+                        messagebox.showinfo("Thành công", f"Đã gửi thông điệp tới {target} thành công!\n{res_text}")
                 else:
                     self._set_status("Sender: Gửi tin thất bại.")
                     messagebox.showwarning("Thất bại", f"Không thể gửi tin qua vệ tinh:\n{res_text}")
@@ -1096,10 +1297,28 @@ class RockBlockDualApp:
 
         self._set_status("Sender đang kiểm tra hộp thư xem Receiver đã gửi ACK về chưa...")
         def _worker():
-            has_msg, msg, _ = self.sender_modem.check_mailbox(wait_sbd=20)
+            has_msg, msg, queued = self.sender_modem.check_mailbox(wait_sbd=20)
             def _update_ui():
                 if has_msg:
+                    self._record_stat("sender_recv")
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self._add_sender_inbox_item(timestamp, msg, source="Phản hồi ACK", status="Đã nhận")
                     self._set_status(f"Sender: Nhận được phản hồi: {msg}")
+                    self.dual_sender_info.config(text=f"Cổng: {self.sender_modem.port} | Sóng: {self.sender_modem.last_bars}/5 vạch | Đã nhận ACK: '{msg[:15]}'")
+
+                    # Kiểm tra tiếp nếu còn tin trong hàng đợi (queued)
+                    if queued > 0:
+                        def _fetch_queue(q=queued):
+                            curr_q = q
+                            while curr_q > 0:
+                                time.sleep(2)
+                                h_next, m_next, curr_q = self.sender_modem.check_mailbox(wait_sbd=20)
+                                if h_next:
+                                    self._record_stat("sender_recv")
+                                    t_next = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    self.root.after(0, lambda t=t_next, m=m_next: self._add_sender_inbox_item(t, m, source="Hàng đợi Gateway", status="Đã nhận"))
+                        threading.Thread(target=_fetch_queue, daemon=True).start()
+
                     messagebox.showinfo("Nhận Bản Tin Phản Hồi", f"🎉 ĐÃ NHẬN ĐƯỢC PHẢN HỒI (ACK):\n\"{msg}\"")
                 else:
                     self._set_status("Sender: Hộp thư trống, chưa có phản hồi nào.")
@@ -1107,6 +1326,73 @@ class RockBlockDualApp:
             self.root.after(0, _update_ui)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _add_sender_inbox_item(self, timestamp, content, source="Phản hồi ACK", status="Đã nhận"):
+        """Thêm một tin nhắn nhận về vào bảng Hộp thư của Sender."""
+        length = len(content.encode("utf-8")) if content else 0
+        item_id = self.sender_inbox_tree.insert("", 0, values=(timestamp, source, content, length, status))
+        count = len(self.sender_inbox_tree.get_children())
+        self.sender_inbox_count_lbl.config(text=f"Tổng nhận: {count} tin nhắn")
+        return item_id
+
+    def _clear_sender_inbox(self):
+        """Xóa toàn bộ danh sách tin nhắn trong Hộp thư Sender."""
+        for item in self.sender_inbox_tree.get_children():
+            self.sender_inbox_tree.delete(item)
+        self.sender_inbox_count_lbl.config(text="Tổng nhận: 0 tin nhắn")
+        self._set_status("Sender: Đã xóa toàn bộ hộp thư.")
+
+    def _export_tree_data(self, tree, prefix="inbox"):
+        """Xuất danh sách tin nhắn từ Treeview ra file văn bản."""
+        items = tree.get_children()
+        if not items:
+            messagebox.showinfo("Thông báo", "Hộp thư chưa có tin nhắn nào để xuất!")
+            return
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=f"rockblock_{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        )
+        if filename:
+            try:
+                with open(filename, "w", encoding="utf-8") as f:
+                    for item_id in items:
+                        vals = tree.item(item_id, "values")
+                        f.write(" | ".join(map(str, vals)) + "\n")
+                messagebox.showinfo("Thành công", f"Đã lưu danh sách tin nhắn tại:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể lưu file: {e}")
+
+    def _show_tree_detail(self, tree, title="Chi Tiết Tin Nhắn"):
+        """Hiển thị cửa sổ chi tiết khi nhấp đúp vào dòng tin nhắn."""
+        selected = tree.selection()
+        if not selected:
+            return
+        vals = tree.item(selected[0], "values")
+        if not vals:
+            return
+
+        detail_win = tk.Toplevel(self.root)
+        detail_win.title(title)
+        detail_win.geometry("520x340")
+        detail_win.minsize(420, 240)
+        detail_win.transient(self.root)
+
+        tk.Label(detail_win, text=f"🕒 Thời gian: {vals[0]}", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(10, 2))
+        if len(vals) >= 5:
+            tk.Label(detail_win, text=f"🏷️ Phân loại: {vals[1]} | 📏 Độ dài: {vals[3]} bytes | 🟢 Trạng thái: {vals[4]}", font=("Segoe UI", 9)).pack(anchor="w", padx=15, pady=2)
+            content = vals[2]
+        else:
+            tk.Label(detail_win, text=f"📏 Độ dài: {vals[2]} bytes | 🟢 Trạng thái: {vals[3]}", font=("Segoe UI", 9)).pack(anchor="w", padx=15, pady=2)
+            content = vals[1]
+
+        tk.Label(detail_win, text="📝 Nội dung chi tiết:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(8, 2))
+        txt = scrolledtext.ScrolledText(detail_win, font=("Consolas", 10), wrap="word")
+        txt.pack(fill="both", expand=True, padx=15, pady=(0, 10))
+        txt.insert("1.0", str(content))
+        txt.config(state="disabled")
+
+        ttk.Button(detail_win, text="Đóng", command=detail_win.destroy).pack(pady=(0, 10))
 
     # --------------------------------------------------------------------------
     # THAO TÁC RECEIVER
@@ -1215,6 +1501,7 @@ class RockBlockDualApp:
             has_msg, msg, queued = self.receiver_modem.check_mailbox(wait_sbd=20)
             def _update_ui():
                 if has_msg:
+                    self._record_stat("receiver_recv")
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     ack_info = "Không gửi ACK"
                     if self.recv_auto_ack_var.get():
@@ -1240,8 +1527,10 @@ class RockBlockDualApp:
         def _ack_worker():
             time.sleep(2)
             self._set_status(f"Receiver: Đang tự động gửi bản tin phản hồi ('{ack_payload}') về {sender_target}...")
-            ok, res = self.receiver_modem.send_sbd_message(ack_payload, target_serial=sender_target, wait_sbd=20)
+            ok, res, _ = self.receiver_modem.send_sbd_message(ack_payload, target_serial=sender_target, wait_sbd=20)
             def _done():
+                if ok:
+                    self._record_stat("receiver_sent")
                 status_str = "✅ Đã gửi ACK thành công" if ok else "❌ Gửi ACK thất bại"
                 try:
                     vals = list(self.inbox_tree.item(item_id, "values"))
@@ -1280,6 +1569,7 @@ class RockBlockDualApp:
                 if bars >= 1:
                     has_msg, msg, queued = self.receiver_modem.check_mailbox(wait_sbd=20)
                     if has_msg:
+                        self._record_stat("receiver_recv")
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         def _add_inbox(m=msg):
                             ack_txt = "Đang gửi Auto-ACK..." if self.recv_auto_ack_var.get() else "Tắt Auto-ACK"
@@ -1293,6 +1583,7 @@ class RockBlockDualApp:
                             time.sleep(3)
                             has_next, next_msg, queued = self.receiver_modem.check_mailbox(wait_sbd=20)
                             if has_next:
+                                self._record_stat("receiver_recv")
                                 t_next = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 def _add_next(nm=next_msg):
                                     iid = self.inbox_tree.insert("", 0, values=(t_next, nm, len(nm), "Đang gửi ACK..."))
@@ -1337,9 +1628,10 @@ class RockBlockDualApp:
         self._set_status(f"Receiver đang gửi bản tin phản hồi thủ công về {target}...")
 
         def _worker():
-            ok, res = self.receiver_modem.send_sbd_message(text, target_serial=target, wait_sbd=20)
+            ok, res, _ = self.receiver_modem.send_sbd_message(text, target_serial=target, wait_sbd=20)
             def _update_ui():
                 if ok:
+                    self._record_stat("receiver_sent")
                     self._set_status("Receiver: Gửi phản hồi thành công!")
                     messagebox.showinfo("Thành công", f"Đã gửi phản hồi thành công về {target}!\n{res}")
                 else:
