@@ -539,7 +539,7 @@ class RockBlockDualApp:
         btn_sender_csq = ttk.Button(r2, text="📶 Đo Sóng CSQ", command=self._check_sender_signal)
         btn_sender_csq.pack(side="left", padx=10)
 
-        self.sender_csq_lbl = tk.Label(r2, text="Sóng: [□□□□□] (0/5)", font=("Consolas", 5, "bold"), fg="#2b6cb0", bg="#ffffff")
+        self.sender_csq_lbl = tk.Label(r2, text="Sóng: [□□□□□] (0/5)", font=("Consolas", 10, "bold"), fg="#2b6cb0", bg="#ffffff")
         self.sender_csq_lbl.pack(side="left", padx=5)
 
         # Tự động đo sóng định kỳ cho Sender
@@ -553,7 +553,7 @@ class RockBlockDualApp:
         cb_sender_auto_csq.pack(side="left", padx=(12, 2))
 
         self.sender_csq_interval_cb = ttk.Combobox(r2, values=["5", "10", "15", "30", "60"], width=4, state="readonly")
-        self.sender_csq_interval_cb.set("10")
+        self.sender_csq_interval_cb.set("5")
         self.sender_csq_interval_cb.pack(side="left", padx=2)
         tk.Label(r2, text="giây", font=("Segoe UI", 8), bg="#ffffff").pack(side="left")
 
@@ -747,7 +747,7 @@ class RockBlockDualApp:
         btn_recv_csq = ttk.Button(r2, text="📶 Đo Sóng CSQ", command=self._check_receiver_signal)
         btn_recv_csq.pack(side="left", padx=10)
 
-        self.recv_csq_lbl = tk.Label(r2, text="Sóng: [□□□□□] (0/5)", font=("Consolas", 5, "bold"), fg="#2b6cb0", bg="#ffffff")
+        self.recv_csq_lbl = tk.Label(r2, text="Sóng: [□□□□□] (0/5)", font=("Consolas", 10, "bold"), fg="#2b6cb0", bg="#ffffff")
         self.recv_csq_lbl.pack(side="left", padx=5)
 
         # Tự động đo sóng định kỳ cho Receiver
@@ -761,7 +761,7 @@ class RockBlockDualApp:
         cb_recv_auto_csq.pack(side="left", padx=(12, 2))
 
         self.recv_csq_interval_cb = ttk.Combobox(r2, values=["5", "10", "15", "30", "60"], width=4, state="readonly")
-        self.recv_csq_interval_cb.set("10")
+        self.recv_csq_interval_cb.set("5")
         self.recv_csq_interval_cb.pack(side="left", padx=2)
         tk.Label(r2, text="giây", font=("Segoe UI", 8), bg="#ffffff").pack(side="left")
 
